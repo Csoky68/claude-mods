@@ -20,8 +20,8 @@
     },
     {
       "name": "usage-header",
-      "version": "0.1.0",
-      "description": "Sáv a prompt fölött: a kontextusablak kategóriánként színes sávban (rendszerprompt, eszközök, memória, üzenetek, szabad hely…), alatta az 5 órás és a heti limit színes sávval és reset idővel. /hasznalat be|ki. Magyar/angol.",
+      "version": "0.2.0",
+      "description": "Kompakt sáv a prompt fölött: a kontextusablak telítettsége vékony színes sávval (%, használt/max token), alatta az 5 órás és a heti limit reset idővel. /hasznalat be|ki. Alapból magyar, angolul is.",
       "author": {
         "name": "Szota Szabolcs",
         "email": "szota.szabolcs@gmail.com"

@@ -48,21 +48,19 @@ A státuszsorba (a prompt alá) írja:
 
 ### usage-header
 
-Sáv a prompt fölött: a kontextusablak kategóriánként színezve, alatta az 5 órás és a heti limit.
+Kompakt sáv a prompt fölött: a kontextusablak telítettsége egy vékony sávval, alatta az 5 órás és a heti limit.
 
 ```
-Kontextus  ██▓▓▓▓▓▓████████████▒▒▒▒▒▒▒▒▒░░░░░░░░░░░░░░ 42% 84k/200k
-           ■ Rendszerprompt 3k  ■ Eszközök 12k  ■ Memória 400  ■ Üzenetek 69k  ▒ Tömörítési tartalék 33k  ░ Szabad 83k
-Limitek    5 óra ███████░░░░░░░░░░░░░ 34% → 16:20   Hét ███████████████████░ 93% ⚠ → Cs 10:00
+Kontextus  ━━━━━━━━━━━━━━━━━━━━━━━━╸━━━━━━━━━━━━━━━  59%  591k / 1M
+Limitek    5 óra ━━╸━━━━━━━━━━━━━  15% → 20:40   Hét ━━━╸━━━━━━━━━━━━  18% → K 03:00
 ```
 
-- A kontextussáv minden kategóriája a `/context` saját színével látszik (rendszerprompt, eszközök, MCP, memóriafájlok, skillek, ágensek, üzenetek), utána a tömörítési tartalék és a szabad hely halványan; alatta jelmagyarázat tokenszámmal. Az igény szerint betöltött (halasztott) eszközsémák kimaradnak, mert nincsenek az ablakban.
-- A bontás helyi becslés (`$.session.usage({ breakdown: 'summary' })`), API-hívás nélkül; minden turn végén és limitmozduláskor frissül.
-- Limitek: zöld 70% alatt, sárga 70–90%, piros 90% fölött (⚠), reset időponttal. Csak Pro/Max előfizetéssel van adat.
+- Színek: zöld 70% alatt, sárga 70–90%, piros 90% fölött (⚠); a sáv vége félcellás pontosságú. A sávok szélessége a terminálhoz igazodik, nem törnek új sorba.
+- Az adat helyi becslés (`$.session.usage()`), modellhívás nélkül; minden turn végén és limitmozduláskor frissül. Limitadat csak Pro/Max előfizetéssel van.
+- Nincs kategóriabontás és elválasztó vonal; a sáv a fókusz mód listája és az eszköztár alatt jelenik meg.
 - `/hasznalat` kapcsolja, `/hasznalat be|ki` beállítja; az állapotot sessionök között megőrzi. Az eszköztárban (`/eszkozok`) is kapcsolható.
-- A sávot megosztja a fókusz mód listájával és az eszköztárral (azok alatt jelenik meg).
 
-Beállítás (`/config`): `usage-header.language` (`auto`/`hu`/`en`).
+Beállítás (`/config`): `usage-header.language` (`hu` alapértelmezett / `auto` / `en`).
 
 ### project-pane
 

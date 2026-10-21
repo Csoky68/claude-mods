@@ -1,7 +1,7 @@
 {
   "name": "usage-header",
-  "version": "0.1.0",
-  "description": "Band above the prompt: context window broken down by category in colours, plus the 5-hour and weekly limits. Hungarian or English.",
+  "version": "0.2.0",
+  "description": "Compact band above the prompt: context window usage bar plus the 5-hour and weekly limits. Hungarian (default) or English.",
   "types": "./types/index.d.ts",
   "author": {
     "name": "Szota Szabolcs",
@@ -11,9 +11,9 @@
     "language": {
       "type": "string",
       "title": "Language / Nyelv",
-      "description": "\"auto\" (default): Hungarian when the system locale (LANG) is Hungarian, English otherwise. \"hu\": magyar. \"en\": English.",
+      "description": "\"hu\" (default): magyar. \"auto\": Hungarian when the system locale (LANG) is Hungarian, English otherwise. \"en\": English.",
       "required": false,
-      "default": "auto",
+      "default": "hu",
       "options": ["auto", "hu", "en"]
     }
   }

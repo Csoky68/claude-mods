@@ -1,20 +1,18 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register, SessionContextBreakdown } from 'claude-code'
+import type { EngineInterface, Register, SessionContextUsage } from 'claude-code'
 
-import type { Breakdown, Limit, Segment, Task } from '../types'
+import type { Context } from '../types'
 
-const breakdown = atom({ plugin: 'usage-header', key: 'breakdown' } as const, null)
+const context = atom({ plugin: 'usage-header', key: 'context' } as const, null)
 const limits = atom({ plugin: 'usage-header', key: 'limits' } as const, [])
-// Kikapcsolva a sáv üres; az eszköztár (tool-hub) is ezt olvassa.
+// When off the band is empty; the tool-hub reads this too.
 const isOn = atom({ plugin: 'usage-header', key: 'isOn' } as const, true)
-
-// A hivatkozásnak szó szerint kell a forrásban állnia (így listázható, mit olvas a mod).
-const FOCUS_ON = { plugin: 'focus-mode', key: 'isOn' } as const
-const FOCUS_TASKS = { plugin: 'focus-mode', key: 'tasks' } as const
 
 const WARN_AT = 90
 const CAUTION_AT = 70
 const LABEL = 11
+const MAX_BAR = 40
+const MAX_LIMIT_BAR = 16
 
 type Lang = 'hu' | 'en'
 
@@ -30,18 +28,6 @@ const STRINGS = {
     off: 'Használati sáv kikapcsolva.',
     usage: 'Használat: /hasznalat [be|ki]',
     hint: '[be|ki]',
-    names: {
-      'System prompt': 'Rendszerprompt',
-      'System tools': 'Eszközök',
-      'MCP tools': 'MCP eszközök',
-      'Custom agents': 'Ágensek',
-      'Memory files': 'Memória',
-      Skills: 'Skillek',
-      'Slash commands': 'Parancsok',
-      Messages: 'Üzenetek',
-      'Free space': 'Szabad',
-      'Autocompact buffer': 'Tömörítési tartalék',
-    } as Record<string, string>,
   },
   en: {
     context: 'Context',
@@ -54,12 +40,11 @@ const STRINGS = {
     off: 'Usage band off.',
     usage: 'Usage: /hasznalat [on|off]',
     hint: '[on|off]',
-    names: {} as Record<string, string>,
   },
 }
 
-// A modul minden beállításváltáskor újratöltődik, így elég egyszer, induláskor eldönteni.
-let lang: Lang = 'en'
+// The module reloads on every settings change, so deciding once at startup is enough.
+let lang: Lang = 'hu'
 const t = () => STRINGS[lang]
 
 async function pickLanguage($: EngineInterface, setting: unknown): Promise<Lang> {
@@ -74,43 +59,30 @@ export function tokens(n: number): string {
   return n >= 1000 ? `${Number((n / 1000).toFixed(1))}k` : String(n)
 }
 
-// A halasztott (igény szerint betöltött) eszközsémák nincsenek az ablakban: kimaradnak.
-export function toBreakdown(b: SessionContextBreakdown): Breakdown {
-  const segments: Segment[] = []
-  for (const c of b.categories) {
-    if (c.kind === 'deferred' || c.tokens <= 0) continue
-    segments.push({ name: c.name, tokens: c.tokens, color: c.color, kind: c.kind })
-  }
-  return { segments, total: b.totalTokens, max: b.rawMaxTokens, percent: b.percentage }
+// Before the first response the percentage is unknown: no data yet.
+export function toContext(u: SessionContextUsage): Context | null {
+  if (u.percent === undefined || !(u.window > 0)) return null
+  return { total: u.tokens ?? Math.round((u.percent / 100) * u.window), max: u.window, percent: u.percent }
 }
 
-// Cellák kategóriánként, legnagyobb maradék szerint kerekítve; ami foglal, legalább egy cellát kap
-// (a szabad helyből), hogy minden szín látsszon.
-export function cells(segments: Segment[], max: number, width: number): number[] {
-  const sum = Math.max(max, segments.reduce((a, s) => a + s.tokens, 0), 1)
-  const exact = segments.map(s => (s.tokens / sum) * width)
-  const out = exact.map(Math.floor)
-  let left = width - out.reduce((a, n) => a + n, 0)
-  const order = exact.map((x, i) => [x - Math.floor(x), i] as const).sort((a, b) => b[0] - a[0])
-  for (const [, i] of order) {
-    if (left <= 0) break
-    out[i]! += 1
-    left -= 1
+// Thin bar split into filled cells, an optional half-cell end and the remaining track.
+export function bar(percent: number, width: number): { filled: string; track: string } {
+  const exact = (Math.min(100, Math.max(0, percent)) / 100) * width
+  let full = Math.floor(exact)
+  let half = exact - full >= 0.5
+  if (full >= width) {
+    full = width
+    half = false
   }
-  const free = segments.findIndex(s => s.kind === 'free')
-  for (const [i, s] of segments.entries()) {
-    if (s.kind !== 'used' || out[i]! > 0) continue
-    const donor = free >= 0 && out[free]! > 1 ? free : out.indexOf(Math.max(...out))
-    if (out[donor]! <= 1) break
-    out[donor]! -= 1
-    out[i] = 1
-  }
-  return out
+  const filled = '━'.repeat(full) + (half ? '╸' : '')
+  return { filled, track: '━'.repeat(width - full - (half ? 1 : 0)) }
 }
 
-const glyph = (kind: Segment['kind']) => (kind === 'used' ? '█' : kind === 'buffer' ? '▒' : '░')
+const clamp = (n: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, n))
 
 const levelColor = (percent: number) => (percent >= WARN_AT ? 'red' : percent >= CAUTION_AT ? 'yellow' : 'green')
+
+const pctText = (percent: number) => `  ${Math.round(percent)}%${percent >= WARN_AT ? ' ⚠' : ''}`
 
 function resetText(kind: string, resetsAt?: string): string {
   if (resetsAt === undefined) return ''
@@ -119,40 +91,10 @@ function resetText(kind: string, resetsAt?: string): string {
   return kind === 'five_hour' ? ` → ${hhmm}` : ` → ${t().days[at.getDay()]} ${hhmm}`
 }
 
-// A fókusz mód feliratai és elrendezése (focus-mode/hooks/register.tsx): ebből jön a lista legszélesebb sora.
-const FOCUS_TEXT = {
-  hu: { title: 'Fókusz mód', done: 'kész', waiting: 'a részfeladatok hamarosan megjelennek…', idle: 'bekapcsolva · /fokusz ki a kikapcsoláshoz' },
-  en: { title: 'Focus mode', done: 'done', waiting: 'subtasks will show up shortly…', idle: 'on · /fokusz off to turn it off' },
-}
-
-// A rajzjelek (vonal, sáv, ikon) egy cellát foglalnak. Az asztali appban a betűk arányos betűtípussal,
-// keskenyebben jelennek meg, így ott egy betű csak ~0,55 vonaldarabnyi helyet foglal.
-const GRAPHIC = /[─█░▒▓◆▸○✓■]/
-export function measure(text: string, narrow: boolean): number {
-  if (!narrow) return text.length
-  let units = 0
-  for (const ch of text) units += GRAPHIC.test(ch) ? 1 : 0.55
-  return Math.ceil(units)
-}
-
-export function focusWidth(list: readonly Task[], columns: number, isWorking: boolean, l: Lang, narrow = false): number {
-  const f = FOCUS_TEXT[l]
-  if (list.length === 0) return measure(`◆ ${f.title} ${isWorking ? f.waiting : f.idle}`, narrow)
-  const done = list.filter(task => task.status === 'done').length
-  const total = Math.round(list.reduce((sum, task) => sum + task.progress, 0) / list.length)
-  const header = `◆ ${f.title}  ${done}/${list.length} ${f.done}  ${'█'.repeat(12)} ${total}%`
-  const titleRoom = Math.max(10, columns - 24)
-  const rows = list.map(task => {
-    const name = task.title.slice(0, titleRoom)
-    return task.status === 'in_progress' ? `  ▸ ${name} ${'█'.repeat(8)} ${task.progress}%` : `  ✓ ${name}`
-  })
-  return Math.max(...[header, ...rows].map(row => measure(row, narrow)))
-}
-
 async function refresh($: EngineInterface): Promise<void> {
-  const usage = await $.session.usage({ breakdown: 'summary' })
-  const b = usage.context.breakdown
-  await update($, breakdown, prev => (b === undefined ? prev : toBreakdown(b)))
+  // Local estimate without the per-category breakdown: no model call.
+  const usage = await $.session.usage()
+  await update($, context, prev => toContext(usage.context) ?? prev)
   await update($, limits, () => usage.rateLimits)
 }
 
@@ -183,14 +125,14 @@ export const register: Register = (on, options) => {
     return { text: wanted ? t().on : t().off }
   })
 
-  // Az eszköztár gombja parancs nélkül kapcsol (így nem marad parancssor a transcriptben).
+  // The tool-hub button toggles without a command (so no command line is left in the transcript).
   on('state.set', { plugin: 'tool-hub', key: 'request' }, async ($, e, next) => {
     const done = await next(e)
     if (e.value?.tool === 'header') await setOn($, e.value.on).catch(() => undefined)
     return done
   })
 
-  // Turn végén és limitmozduláskor: a bontás a helyi becslés ('summary'), API-hívás nélkül.
+  // At turn end and when limits move: refresh from the local estimate, no API call.
   on('session.measure', async ($, e, next) => {
     const result = await next(e)
     const moved = e.changed.includes('context') || e.changed.includes('rateLimits')
@@ -202,84 +144,72 @@ export const register: Register = (on, options) => {
     if (e.props.hasSurvey || !(await read($, isOn))) return next(e)
     const below = await next(e)
     const { Box, Text } = $.ui.resolve(e)
-    const b = await read($, breakdown)
+    const c = await read($, context)
     const shown = (await read($, limits)).filter(l => l.kind in t().windows)
     const columns = e.props.bodyColumns || e.viewport?.columns || 80
-    const width = Math.max(10, Math.min(60, columns - LABEL - 20))
+    // One spare column so the row never touches the edge and wraps.
+    const room = columns - LABEL - 1
 
     const label = (text: string) => <Text bold>{text.padEnd(LABEL)}</Text>
 
-    let contextRows
-    if (b === null || b.segments.length === 0) {
-      contextRows = (
+    let contextRow
+    if (c === null) {
+      contextRow = (
         <Box flexDirection="row">
           {label(t().context)}
           <Text dimColor>{t().noData}</Text>
         </Box>
       )
     } else {
-      const counts = cells(b.segments, b.max, width)
-      const pct = Math.round(b.percent)
-      contextRows = (
-        <Box flexDirection="column">
-          <Box flexDirection="row">
-            {label(t().context)}
-            {b.segments.map((s, i) =>
-              counts[i]! > 0 ? (
-                <Text key={`bar-${i}`} color={s.color} dimColor={s.kind !== 'used'}>
-                  {glyph(s.kind).repeat(counts[i]!)}
-                </Text>
-              ) : null,
-            )}
-            <Text color={levelColor(pct)} bold>{` ${pct}%`}</Text>
-            <Text dimColor>{` ${tokens(b.total)}/${tokens(b.max)}`}</Text>
-          </Box>
-          <Box flexDirection="row" flexWrap="wrap" columnGap={2} paddingLeft={LABEL}>
-            {b.segments.map((s, i) => (
-              <Box key={`legend-${i}`} flexDirection="row">
-                <Text color={s.color} dimColor={s.kind !== 'used'}>{s.kind === 'used' ? '■ ' : `${glyph(s.kind)} `}</Text>
-                <Text dimColor={s.kind !== 'used'}>{`${t().names[s.name] ?? s.name} ${tokens(s.tokens)}`}</Text>
-              </Box>
-            ))}
-          </Box>
+      const pct = pctText(c.percent)
+      const amount = `  ${tokens(c.total)} / ${tokens(c.max)}`
+      const { filled, track } = bar(c.percent, clamp(room - pct.length - amount.length, 4, MAX_BAR))
+      const color = levelColor(c.percent)
+      contextRow = (
+        <Box flexDirection="row">
+          {label(t().context)}
+          <Text color={color}>{filled}</Text>
+          <Text dimColor>{track}</Text>
+          <Text color={color} bold>{pct}</Text>
+          <Text dimColor>{amount}</Text>
         </Box>
       )
     }
 
-    const limitWidth = Math.max(6, Math.min(20, Math.floor((columns - LABEL) / 2) - 26))
+    // Limit bars share the row: subtract each item's name, percent and reset text plus the gaps.
+    const GAP = 4
+    const items = shown.map(l => ({
+      l,
+      name: `${t().windows[l.kind]} `,
+      pct: pctText(l.percentUsed),
+      reset: resetText(l.kind, l.resetsAt),
+    }))
+    const fixed = items.reduce((a, i) => a + i.name.length + i.pct.length + i.reset.length, 0) + GAP * Math.max(0, items.length - 1)
+    const limitWidth = items.length === 0 ? 0 : clamp(Math.floor((room - fixed) / items.length), 4, MAX_LIMIT_BAR)
     const limitRow =
-      shown.length === 0 ? null : (
-        <Box flexDirection="row" flexWrap="wrap" columnGap={3}>
+      items.length === 0 ? null : (
+        <Box flexDirection="row" flexWrap="wrap" columnGap={GAP}>
           {label(t().limits)}
-          {shown.map(l => {
-            const filled = Math.min(limitWidth, Math.round((l.percentUsed / 100) * limitWidth))
+          {items.map(({ l, name, pct, reset }) => {
+            const { filled, track } = bar(l.percentUsed, limitWidth)
             const color = levelColor(l.percentUsed)
             return (
               <Box key={`limit-${l.kind}`} flexDirection="row">
-                <Text>{`${t().windows[l.kind]} `}</Text>
-                <Text color={color}>{'█'.repeat(filled)}</Text>
-                <Text dimColor>{'░'.repeat(limitWidth - filled)}</Text>
-                <Text color={color} bold>{` ${Math.round(l.percentUsed)}%${l.percentUsed >= WARN_AT ? ' ⚠' : ''}`}</Text>
-                <Text dimColor>{resetText(l.kind, l.resetsAt)}</Text>
+                <Text>{name}</Text>
+                <Text color={color}>{filled}</Text>
+                <Text dimColor>{track}</Text>
+                <Text color={color} bold>{pct}</Text>
+                <Text dimColor>{reset}</Text>
               </Box>
             )
           })}
         </Box>
       )
 
-    // Ha a fókusz mód lista van fölötte, a vonal annak legszélesebb soráig tart, különben a kontextussorig.
-    const focusOn = (await $.state.get(FOCUS_ON)).value === true
-    const focusList = focusOn ? ((await $.state.get(FOCUS_TASKS)).value ?? []) : []
-    const narrow = e.surface !== 'terminal'
-    const ownWidth = b === null || b.segments.length === 0 ? measure(' '.repeat(LABEL) + t().noData, narrow) : LABEL + width + 16
-    const divider = Math.max(10, Math.min(columns - 1, focusOn ? focusWidth(focusList, columns, e.props.isWorking, lang, narrow) : ownWidth))
-
-    // Vonal a sáv tetején: elválasztja a fölötte lévő modoktól (fókusz mód listája, eszköztár).
     return (
       <Box flexDirection="column">
         {below}
-        <Text key="divider" dimColor>{'─'.repeat(divider)}</Text>
-        {contextRows}
+        {contextRow}
         {limitRow}
       </Box>
     )

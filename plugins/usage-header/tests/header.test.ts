@@ -7,28 +7,9 @@ const LIMITS = [
   { kind: 'seven_day', percentUsed: 92.5, resetsAt: '2026-10-09T08:00:00Z' },
 ]
 
-const cat = (name: string, tokens: number, color: string, kind: 'used' | 'free' | 'buffer' | 'deferred') =>
-  ({ name, tokens, color, kind, isDeferred: kind === 'deferred' })
-
-const BREAKDOWN = {
-  categories: [
-    cat('System prompt', 3_000, 'promptBorder', 'used'),
-    cat('System tools', 12_000, 'inactive', 'used'),
-    cat('MCP tools', 30_000, 'cyan_FOR_SUBAGENTS_ONLY', 'deferred'),
-    cat('Memory files', 400, 'claude', 'used'),
-    cat('Messages', 68_600, 'purple_FOR_SUBAGENTS_ONLY', 'used'),
-    cat('Free space', 83_000, 'promptBorder', 'free'),
-    cat('Autocompact buffer', 33_000, 'inactive', 'buffer'),
-  ],
-  totalTokens: 84_000,
-  maxTokens: 200_000,
-  rawMaxTokens: 200_000,
-  percentage: 42,
-}
-
 const HU = { options: { language: 'hu' } }
 
-function engine(on: On, withBreakdown = true) {
+function engine(on: On, withData = true) {
   mock.store(on)
   on('command.register', ($, e) => ({ value: { command: e.name } }) as never)
   on('session.start', ($, e) => e as never)
@@ -37,41 +18,59 @@ function engine(on: On, withBreakdown = true) {
   on('session.usage', () => ({
     value: {
       startedAt: 0,
-      context: { window: 200_000, tokens: 84_000, percent: 42, breakdown: withBreakdown ? BREAKDOWN : undefined },
+      context: withData ? { window: 1_000_000, tokens: 591_000, percent: 59.1 } : { window: 1_000_000 },
       rateLimits: LIMITS,
     },
   }) as never)
 }
 
-async function mount($: Parameters<TestBody>[0], surface: 'terminal' | 'desktop') {
+async function mount($: Parameters<TestBody>[0], surface: 'terminal' | 'desktop', bodyColumns = 120) {
   return $.ui.mount({
     plugin: 'usage-header', surface, component: 'AbovePrompt',
-    props: { hasSurvey: false, isWorking: false, maxRows: 20, bodyColumns: 120 } as never,
+    props: { hasSurvey: false, isWorking: false, maxRows: 20, bodyColumns } as never,
   })
 }
 
 for (const surface of ['terminal', 'desktop'] as const) {
-  test(`kontextus kategóriánként színezve és a két limit (${surface})`, HU, async ($, on) => {
+  test(`context bar and the two limits (${surface})`, HU, async ($, on) => {
     engine(on)
     await $.session.start({ cwd: '/tmp', surface, isInteractive: true } as never)
     const ui = await mount($, surface)
     expect(await ui.find({ type: 'Text', text: /^Kontextus/ })).toBeDefined()
-    // Fókusz mód nélkül a vonal a kontextussorig tart (11 + 60 + 16), nem a teljes szélességig.
-    expect(await ui.find({ type: 'Text', text: /^─{87}$/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: ' 42%' })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: 'Rendszerprompt 3k' })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: 'Üzenetek 69k' })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: 'Tömörítési tartalék 33k' })).toBeDefined()
-    // A halasztott MCP-sémák nincsenek az ablakban.
-    expect(await ui.find({ type: 'Text', text: /MCP/ })).toBeUndefined()
+    // 120 columns: bar capped at 40 cells; 59.1% -> 23 full cells + half cell, 16 track cells.
+    expect(await ui.find({ type: 'Text', text: /^━{23}╸$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^━{16}$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: '  59%' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: '  591k / 1M' })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: '5 óra ' })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: ' 93% ⚠' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: '  93% ⚠' })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /→ (V|H|K|Sze|Cs|P|Szo) \d\d:\d\d/ })).toBeDefined()
     await ui.unmount()
   })
 }
 
-test('első válasz előtt: nincs adat felirat', HU, async ($, on) => {
+test('no category legend and no divider row', HU, async ($, on) => {
+  engine(on)
+  await $.session.start({ cwd: '/tmp', surface: 'terminal', isInteractive: true } as never)
+  const ui = await mount($, 'terminal')
+  for (const name of [/Rendszerprompt/, /Üzenetek/, /Szabad/, /Tömörítési/, /Eszközök/, /Memória/, /■/, /[█░▒]/])
+    expect(await ui.find({ type: 'Text', text: name })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /─/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('narrow width (60 columns): the context row fits on one line', HU, async ($, on) => {
+  engine(on)
+  await $.session.start({ cwd: '/tmp', surface: 'terminal', isInteractive: true } as never)
+  const ui = await mount($, 'terminal', 60)
+  // 60 - label 11 - spare 1 - "  59%" 5 - "  591k / 1M" 11 = 32 cells; 59.1% -> 18 full + half + 13 track.
+  expect(await ui.find({ type: 'Text', text: /^━{18}╸$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^━{13}$/ })).toBeDefined()
+  // Row length: 11 + 32 + 5 + 11 = 59 < 60.
+  await ui.unmount()
+})
+
+test('before the first response: no data label', HU, async ($, on) => {
   engine(on, false)
   await $.session.start({ cwd: '/tmp', surface: 'terminal', isInteractive: true } as never)
   const ui = await mount($, 'terminal')
@@ -79,7 +78,7 @@ test('első válasz előtt: nincs adat felirat', HU, async ($, on) => {
   await ui.unmount()
 })
 
-test('/hasznalat ki: a sáv eltűnik, be: visszajön', HU, async ($, on) => {
+test('/hasznalat ki: the band disappears, be: it comes back', HU, async ($, on) => {
   engine(on)
   await $.session.start({ cwd: '/tmp', surface: 'terminal', isInteractive: true } as never)
   expect((await $.command.run({ command: 'hasznalat', args: 'ki' } as never)).text).toBe('Használati sáv kikapcsolva.')
@@ -88,34 +87,15 @@ test('/hasznalat ki: a sáv eltűnik, be: visszajön', HU, async ($, on) => {
   await ui.unmount()
   await $.command.run({ command: 'hasznalat', args: 'be' } as never)
   ui = await mount($, 'terminal')
-  expect(await ui.find({ type: 'Text', text: ' 42%' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '  59%' })).toBeDefined()
   await ui.unmount()
 })
 
-test('angolul is', { options: { language: 'en' } }, async ($, on) => {
+test('English too', { options: { language: 'en' } }, async ($, on) => {
   engine(on)
   await $.session.start({ cwd: '/tmp', surface: 'terminal', isInteractive: true } as never)
   const ui = await mount($, 'terminal')
-  expect(await ui.find({ type: 'Text', text: 'System prompt 3k' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^Context/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: 'Week ' })).toBeDefined()
   await ui.unmount()
-})
-
-test('fókusz móddal a vonal a lista legszélesebb soráig tart', HU, async ($, on) => {
-  engine(on)
-  const tasks = [
-    { title: 'Rövid', status: 'done', progress: 100 },
-    { title: 'Vonal hosszának igazítása', status: 'in_progress', progress: 40 },
-  ]
-  on('state.get', ($, e, next) =>
-    e.plugin === 'focus-mode' ? ({ value: { value: e.key === 'isOn' ? true : tasks, version: 1 } }) as never : next(e))
-  await $.session.start({ cwd: '/tmp', surface: 'terminal', isInteractive: true } as never)
-  const ui = await mount($, 'terminal')
-  // fejléc: "◆ Fókusz mód  1/2 kész  " (24) + 12 + " 70%" (4) = 40; a futó sor: 4 + 25 + 1 + 8 + 4 = 42
-  expect(await ui.find({ type: 'Text', text: /^─{42}$/ })).toBeDefined()
-  await ui.unmount()
-  // Asztali appban a betűk keskenyebbek: a futó sor 33 betű × 0,55 + 9 rajzjel ≈ 28
-  const desk = await mount($, 'desktop')
-  expect(await desk.find({ type: 'Text', text: /^─{28}$/ })).toBeDefined()
-  await desk.unmount()
 })
