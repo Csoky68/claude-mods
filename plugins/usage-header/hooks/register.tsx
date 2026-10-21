@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, SessionContextUsage } from 'claude-code'
 
-import type { Burn, Context, Git, Limit, Location, Sample, SessionInfo } from '../types'
+import type { Burn, Context, Git, Limit, Location, PaneName, Sample, SessionInfo } from '../types'
 
 const context = atom({ plugin: 'usage-header', key: 'context' } as const, null)
 const limits = atom({ plugin: 'usage-header', key: 'limits' } as const, [])
@@ -16,6 +16,15 @@ const sessionInfo = atom({ plugin: 'usage-header', key: 'session' } as const, nu
 // or "usage-header:hidden": true. Then the band draws nothing.
 const muted = atom({ plugin: 'usage-header', key: 'muted' } as const, false)
 const SWITCH_POLL_MS = 5000
+// The band's Mods / Inventory buttons: the press writes an open request, the owning plugin
+// hooks state.set on it and opens its own pane (no command, no model call, no transcript row).
+const openPane = atom({ plugin: 'usage-header', key: 'openPane' } as const, null)
+const panes = atom({ plugin: 'usage-header', key: 'panes' } as const, [])
+// Pane -> the plugin that owns it (its installed name and its switches.json key).
+export const PANE_PLUGIN: Record<PaneName, string> = { mods: 'mods', inventory: 'chat-inventory' }
+const PANE_ORDER: PaneName[] = ['mods', 'inventory']
+// Room the desktop button column takes right of the drawing, in px.
+export const BUTTONS_PX = 104
 
 const WARN_AT = 90
 const CAUTION_AT = 70
@@ -55,6 +64,7 @@ const STRINGS = {
     enough: 'elég resetig',
     estimate: 'becslés',
     modified: (n: number) => `${n} módosított`,
+    buttons: { mods: 'Modok', inventory: 'Inventory' } as Record<PaneName, string>,
   },
   en: {
     context: 'Context',
@@ -77,6 +87,7 @@ const STRINGS = {
     enough: 'lasts until reset',
     estimate: 'estimate',
     modified: (n: number) => `${n} modified`,
+    buttons: { mods: 'Mods', inventory: 'Inventory' } as Record<PaneName, string>,
   },
 }
 
@@ -423,7 +434,59 @@ async function refreshLocation($: EngineInterface, machines: Record<string, stri
 }
 
 let switchesRaw: string | null = null
+let switchesJson: Record<string, unknown> = {}
 let switchTimer = false
+// Plugins (of PANE_PLUGIN) found installed at session start.
+let installed = new Set<string>()
+
+// installed_plugins.json keys are "<plugin>@<marketplace>"; without a readable file, the plugin
+// cache (~/.claude/plugins/cache/<marketplace>/<plugin>) decides. A ~/.claude/mods/<plugin> folder
+// with a plugin.json counts too (a mod installed by folder).
+export async function findInstalled($: EngineInterface, homeDir: string): Promise<Set<string>> {
+  const wanted = Object.values(PANE_PLUGIN)
+  const found = new Set<string>()
+  let recorded = false
+  try {
+    const path = `${homeDir}/.claude/plugins/installed_plugins.json`
+    if (await $.fs.exists(path)) {
+      const json = JSON.parse(String(await $.fs.read(path))) as { plugins?: Record<string, unknown> }
+      if (json && typeof json.plugins === 'object' && json.plugins !== null) {
+        recorded = true
+        for (const key of Object.keys(json.plugins)) {
+          const name = key.split('@')[0] ?? ''
+          if (wanted.includes(name)) found.add(name)
+        }
+      }
+    }
+  } catch {
+    recorded = false
+  }
+  if (!recorded) {
+    try {
+      for (const market of await $.fs.list(`${homeDir}/.claude/plugins/cache`)) {
+        if (market.kind !== 'dir') continue
+        for (const name of wanted)
+          if (await $.fs.exists(`${homeDir}/.claude/plugins/cache/${market.name}/${name}`).catch(() => false)) found.add(name)
+      }
+    } catch {
+      // No cache folder.
+    }
+  }
+  for (const name of wanted) {
+    if (found.has(name)) continue
+    if (await $.fs.exists(`${homeDir}/.claude/mods/${name}/.claude-plugin/plugin.json`).catch(() => false)) found.add(name)
+  }
+  return found
+}
+
+// The buttons drawn: installed and not switched off ("<plugin>": false) in switches.json.
+export const shownPanes = (have: ReadonlySet<string>, json: Record<string, unknown>): PaneName[] =>
+  PANE_ORDER.filter(p => have.has(PANE_PLUGIN[p]) && json[PANE_PLUGIN[p]] !== false)
+
+async function refreshPanes($: EngineInterface): Promise<void> {
+  const next = shownPanes(installed, switchesJson)
+  await update($, panes, prev => (prev.join() === next.join() ? prev : next))
+}
 
 // One small file read per poll; the band is only redrawn when the file's text changed.
 // An unreadable or half-written file keeps the last decision.
@@ -439,6 +502,8 @@ export async function readSwitchboard($: EngineInterface): Promise<void> {
       json = parsed as Record<string, unknown>
     }
     switchesRaw = raw
+    switchesJson = json
+    await refreshPanes($)
     const off = json['usage-header'] === false || json['usage-header:hidden'] === true
     await update($, muted, () => off)
   } catch {
@@ -489,6 +554,9 @@ export function whereParts(loc: Location, info: SessionInfo | null, now: number,
   return parts
 }
 
+// The terminal draws a Button as "[ label ]"; one space before each.
+export const buttonsLength = (shown: readonly PaneName[]) => shown.reduce((a, p) => a + 1 + t().buttons[p].length + 4, 0)
+
 const altParts = (parts: readonly Part[]) => parts.map(p => `${p.sep}${p.text}${p.estimate ? ` (${t().estimate})` : ''}`).join('')
 
 export const register: Register = (on, options) => {
@@ -506,7 +574,9 @@ export const register: Register = (on, options) => {
     await $.command.register({ name: 'hasznalat', description: t().command, argumentHint: t().hint, immediate: true })
     await refreshLocation($, machines).catch(() => undefined)
     await refresh($)
+    installed = await findInstalled($, (await $.env.get('HOME')) ?? '').catch(() => new Set<string>())
     await readSwitchboard($)
+    await refreshPanes($)
     if (!switchTimer) {
       switchTimer = true
       $.clock.every(SWITCH_POLL_MS, () => {
@@ -532,6 +602,13 @@ export const register: Register = (on, options) => {
     return done
   })
 
+  // A band button: write the open request; mods / chat-inventory open their own pane from it.
+  on('ui.press', { plugin: 'usage-header', element: /^open-(mods|inventory)$/ }, async ($, e) => {
+    const pane = e.element.slice('open-'.length) as PaneName
+    await update($, openPane, prev => ({ pane, n: (prev?.n ?? 0) + 1 }))
+    return { element: e.element }
+  })
+
   // At turn end and when limits move: refresh from the local figures, no API call.
   on('session.measure', async ($, e, next) => {
     const result = await next(e)
@@ -551,7 +628,10 @@ export const register: Register = (on, options) => {
     if (e.props.hasSurvey || !(await read($, isOn)) || (await read($, muted))) return next(e)
     const below = await next(e)
     const ui = $.ui.resolve(e)
-    const { Box, Text } = ui
+    const { Box, Text, Button } = ui
+    const shownButtons = await read($, panes)
+    // Presses are handled by the ui.press hook above; a closure lives for one drawing only.
+    const noop = () => undefined
     const c = await read($, context)
     const now = Date.now()
     const shown = mergeLimits([], await read($, limits), now).filter(l => l.kind in t().windows)
@@ -567,7 +647,9 @@ export const register: Register = (on, options) => {
     if (e.surface !== 'terminal' && 'Svg' in ui && ui.Svg) {
       const { Svg } = ui
       // Columns are character cells; at ~7 px each this keeps the drawing inside the slot.
-      const slot = columns > 0 ? Math.floor(columns * 7) : 900
+      // The button column takes its room first, so the drawing shrinks instead of wrapping.
+      const reserve = shownButtons.length > 0 ? BUTTONS_PX : 0
+      const slot = (columns > 0 ? Math.floor(columns * 7) : 900) - reserve
       // Each row sheds its own texts, lowest rank first, until it fits the slot.
       const fitsExtra = (k: Part[]) => k.length === 0 || EXTRA_X + partsLength(k) * CH + 8 <= slot
       const keep = (parts: Part[]) => {
@@ -595,10 +677,25 @@ export const register: Register = (on, options) => {
       const source = bandSvg(rows, noData, where)
       const canvas = Number(/viewBox="0 0 (\d+)/.exec(source)?.[1] ?? SVG_W)
       const width = columns > 0 ? Math.min(canvas, slot) : undefined
+      const svg = <Svg key="usage-band" source={source} alt={alt} width={width} />
+      if (shownButtons.length === 0)
+        return (
+          <Box flexDirection="column">
+            {below}
+            {svg}
+          </Box>
+        )
       return (
         <Box flexDirection="column">
           {below}
-          <Svg key="usage-band" source={source} alt={alt} width={width} />
+          <Box flexDirection="row" alignItems="center" justifyContent="space-between">
+            {svg}
+            <Box flexDirection="column" justifyContent="center" alignItems="flex-end" gap="xs">
+              {shownButtons.map(p => (
+                <Button key={`open-${p}`} label={t().buttons[p]} variant="secondary" onPress={noop} />
+              ))}
+            </Box>
+          </Box>
         </Box>
       )
     }
@@ -674,12 +771,22 @@ export const register: Register = (on, options) => {
     if (loc !== null) {
       // Keep at least ~24 characters for the path before dropping the location's other texts.
       const prefix = [loc.machine, loc.ssh ? 'SSH' : t().local].filter(Boolean).join(' · ').length + 3
-      const kept = dropUntil(locParts, k => LABEL + prefix + 24 + partsLength(k) <= lineRoom)
+      // The buttons go first when the row is short: only drawn when everything else fits whole.
+      const btnLen = buttonsLength(shownButtons)
+      const withButtons = btnLen > 0 && LABEL + prefix + 24 + partsLength(locParts) + btnLen <= lineRoom
+      const room = lineRoom - (withButtons ? btnLen : 0)
+      const kept = dropUntil(locParts, k => LABEL + prefix + 24 + partsLength(k) <= room)
       whereRow = (
         <Box flexDirection="row">
           {label(t().where)}
-          <Text dimColor>{formatLocation(loc, t().local, home, lineRoom - LABEL - partsLength(kept))}</Text>
+          <Text dimColor>{formatLocation(loc, t().local, home, room - LABEL - partsLength(kept))}</Text>
           {extras(kept, 'loc')}
+          {withButtons
+            ? shownButtons.flatMap(p => [
+                <Text key={`gap-${p}`}> </Text>,
+                <Button key={`open-${p}`} label={t().buttons[p]} onPress={noop} />,
+              ])
+            : null}
         </Box>
       )
     }

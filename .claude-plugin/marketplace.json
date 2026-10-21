@@ -20,7 +20,7 @@
     },
     {
       "name": "usage-header",
-      "version": "0.4.1",
+      "version": "0.5.0",
       "description": "Kompakt sáv a prompt fölött: a kontextusablak telítettsége (%, használt/max token), alatta az 5 órás és a heti limit reset idővel, végül a hely (gép · helyi/SSH · projektmappa · git · időtartam · költség); visszaszámlálás, fogyási becslés és tömörítésig hátralévő hely. Terminálban blokksáv, az asztali appban lekerekített SVG-sávok. /hasznalat be|ki. Alapból magyar, angolul is.",
       "author": {
         "name": "Szota Szabolcs",

@@ -23,7 +23,12 @@ type Env = {
   git?: { branch: string; porcelain: string }; contexts?: number[]; startedAt?: number; usd?: number; threshold?: number
   /** The /mods switchboard file's text; absent: no file. Read through `.text` so a test can change it. */
   switches?: { text?: string }
+  /** installed_plugins.json's text; absent: no file (and no plugin cache either). */
+  installed?: string
 }
+
+const INSTALLED = `${'/Users/csoky'}/.claude/plugins/installed_plugins.json`
+const BOTH = JSON.stringify({ version: 2, plugins: { 'mods@csoky-private': [{}], 'chat-inventory@csoky-private': [{}], 'usage-header@claude-mods': [{}] } })
 
 const SWITCHES = `${'/Users/csoky'}/.claude/mods/switches.json`
 
@@ -41,11 +46,16 @@ function engine(on: On, withData = true, env: Env = {}) {
     e.name === 'HOME' ? ({ value: HOME }) as never : e.name === 'SSH_CONNECTION' ? ({ value: env.ssh }) as never : next(e))
   on('session.root', () => ({ value: ROOT }) as never)
   // The switchboard file is always faked: the real one on this machine never leaks into a test.
-  on('fs.exists', ($, e, next) => (e.path === SWITCHES ? ({ value: env.switches?.text !== undefined }) as never : next(e)))
-  on('fs.read', ($, e, next) => {
-    if (e.path !== SWITCHES) return next(e)
-    if (env.switches?.text === undefined) throw new Error('ENOENT')
-    return { value: env.switches.text } as never
+  // So is every other path (installed_plugins.json, the plugin cache, ~/.claude/mods).
+  on('fs.exists', ($, e) =>
+    ({ value: e.path === SWITCHES ? env.switches?.text !== undefined : e.path === INSTALLED ? env.installed !== undefined : false }) as never)
+  on('fs.read', ($, e) => {
+    const text = e.path === SWITCHES ? env.switches?.text : e.path === INSTALLED ? env.installed : undefined
+    if (text === undefined) throw new Error('ENOENT')
+    return { value: text } as never
+  })
+  on('fs.list', () => {
+    throw new Error('ENOENT')
   })
   const responses = env.rateLimits ?? [LIMITS]
   let call = 0
@@ -391,5 +401,74 @@ test('the switchboard is polled: turned off, then on again, within 5 seconds', H
   await clock.advance(5000)
   ui = await mount($, 'terminal')
   expect(await ui.find({ type: 'Text', text: ' 59%' }), 'no file: on again').toBeDefined()
+  await ui.unmount()
+})
+
+for (const surface of ['terminal', 'desktop'] as const) {
+  test(`Mods and Inventory buttons in the band; a press writes the open request (${surface})`, HU, async ($, on) => {
+    engine(on, true, { installed: BOTH, git: { branch: 'main', porcelain: '' }, usd: 49.36 })
+    // The request is a state write: every write of the key is seen here, before the kit stores it.
+    const requests: unknown[] = []
+    on('state.set', ($, e, next) => {
+      if (e.plugin === 'usage-header' && e.key === 'openPane') requests.push(e.value)
+      return next(e)
+    })
+    await $.session.start({ cwd: '/tmp', surface, isInteractive: true } as never)
+    const ui = await mount($, surface, 140)
+    const mods = await ui.find({ key: 'open-mods' })
+    const inv = await ui.find({ key: 'open-inventory' })
+    expect(mods?.type).toBe('Button')
+    expect(mods?.props.label).toBe('Modok')
+    expect(inv?.props.label).toBe('Inventory')
+    if (surface === 'desktop') {
+      // The drawing gives the button column its room: 140 columns * 7 px - the column.
+      const svg = await ui.find({ type: 'Svg' })
+      expect(Number(svg!.props.width)).toBeLessThanOrEqual(140 * 7 - 104)
+    } else {
+      // Terminal: at the end of the location row, nothing dropped at 140 columns.
+      expect(JSON.stringify(await ui.drawn())).toMatch(/≈ \$49\.36/)
+    }
+    // Nothing is written before a press.
+    expect(requests).toEqual([])
+    await ui.press({ key: 'open-inventory' })
+    expect(requests).toEqual([{ pane: 'inventory', n: 1 }])
+    await ui.press({ key: 'open-mods' })
+    expect(requests).toEqual([{ pane: 'inventory', n: 1 }, { pane: 'mods', n: 2 }])
+    await ui.unmount()
+  })
+
+  test(`no buttons when neither mod is installed (${surface})`, HU, async ($, on) => {
+    engine(on, true, { installed: JSON.stringify({ version: 2, plugins: { 'usage-header@claude-mods': [{}] } }) })
+    await $.session.start({ cwd: '/tmp', surface, isInteractive: true } as never)
+    const ui = await mount($, surface, 140)
+    expect(await ui.find({ type: 'Button' })).toBeUndefined()
+    if (surface === 'desktop') expect(await ui.find({ type: 'Svg' })).toBeDefined()
+    await ui.unmount()
+  })
+
+  test(`a mod switched off in switches.json loses its button (${surface})`, HU, async ($, on) => {
+    engine(on, true, { installed: BOTH, switches: { text: '{ "chat-inventory": false }' } })
+    await $.session.start({ cwd: '/tmp', surface, isInteractive: true } as never)
+    const ui = await mount($, surface, 140)
+    expect(await ui.find({ key: 'open-mods' })).toBeDefined()
+    expect(await ui.find({ key: 'open-inventory' })).toBeUndefined()
+    await ui.unmount()
+  })
+}
+
+test('terminal: narrow width drops the buttons first, the location row still fits', HU, async ($, on) => {
+  engine(on, true, { installed: BOTH, git: { branch: 'main', porcelain: '' } })
+  await $.session.start({ cwd: '/tmp', surface: 'terminal', isInteractive: true } as never)
+  const ui = await mount($, 'terminal', 80)
+  expect(await ui.find({ type: 'Button' })).toBeUndefined()
+  expect(JSON.stringify(await ui.drawn())).toMatch(/main/)
+  await ui.unmount()
+})
+
+test('English labels', { options: { language: 'en' } }, async ($, on) => {
+  engine(on, true, { installed: BOTH })
+  await $.session.start({ cwd: '/tmp', surface: 'terminal', isInteractive: true } as never)
+  const ui = await mount($, 'terminal', 140)
+  expect((await ui.find({ key: 'open-mods' }))?.props.label).toBe('Mods')
   await ui.unmount()
 })
