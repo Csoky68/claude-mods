@@ -59,6 +59,8 @@ Limitek    5 óra ███████░░░░░░░░░░░░░ 3
 - Színek: zöld 70% alatt, sárga 70–90%, piros 90% fölött (⚠). A terminálos kontextussor nem törik új sorba.
 - Az adat helyi becslés (`$.session.usage()`), modellhívás nélkül; minden turn végén és limitmozduláskor frissül. Limitadat csak Pro/Max előfizetéssel van.
 - Utolsó sor a **Hely**: gép · helyi/SSH · projektmappa (pl. `M4 · helyi · ~/CLAUDE/Projects/claude-mods`); a gépneveket a `usage-header.machineNames` beállítás képezi le (`host=Név,…`), a hosszú útvonal középen rövidül. A limiteket típusonként összefésüli (egy hiányzó válasz nem tünteti el az 5 órás sávot), lejárt értéket eldob.
+- A sorok jobb oldalán (0.4.0): a kontextusnál `még ~376k tömörítésig (~12 kör)`, a limiteknél visszaszámlálás és fogyási becslés (`még 2ó 15p · elfogy ~19:50 ⚠` / `elég resetig`), a Hely sorban git-ág, módosított fájlok, session-idő és API-egyenértékű költség (`· main · 3 módosított · 1ó 20p · ≈ $4.10`).
+- Minden helyi adat, modellhívás nélkül; szűk ablakban előbb a költség, aztán a kör, aztán a visszaszámlálás marad el.
 - Nincs kategóriabontás és elválasztó vonal; a sáv a fókusz mód listája és az eszköztár alatt jelenik meg.
 - `/hasznalat` kapcsolja, `/hasznalat be|ki` beállítja; az állapotot sessionök között megőrzi. Az eszköztárban (`/eszkozok`) is kapcsolható.
 
