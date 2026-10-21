@@ -58,10 +58,11 @@ Limitek    5 óra ███████░░░░░░░░░░░░░ 3
 - Terminálban blokksáv (fent); az asztali appban (és mobilon) egyetlen SVG: három sor (Kontextus / 5 óra / Hét) igazított, lekerekített sávokkal, sötét és világos témához.
 - Színek: zöld 70% alatt, sárga 70–90%, piros 90% fölött (⚠). A terminálos kontextussor nem törik új sorba.
 - Az adat helyi becslés (`$.session.usage()`), modellhívás nélkül; minden turn végén és limitmozduláskor frissül. Limitadat csak Pro/Max előfizetéssel van.
+- Utolsó sor a **Hely**: gép · helyi/SSH · projektmappa (pl. `M4 · helyi · ~/CLAUDE/Projects/claude-mods`); a gépneveket a `usage-header.machineNames` beállítás képezi le (`host=Név,…`), a hosszú útvonal középen rövidül. A limiteket típusonként összefésüli (egy hiányzó válasz nem tünteti el az 5 órás sávot), lejárt értéket eldob.
 - Nincs kategóriabontás és elválasztó vonal; a sáv a fókusz mód listája és az eszköztár alatt jelenik meg.
 - `/hasznalat` kapcsolja, `/hasznalat be|ki` beállítja; az állapotot sessionök között megőrzi. Az eszköztárban (`/eszkozok`) is kapcsolható.
 
-Beállítás (`/config`): `usage-header.language` (`hu` alapértelmezett / `auto` / `en`).
+Beállítás (`/config`): `usage-header.language` (`hu` alapértelmezett / `auto` / `en`), `usage-header.machineNames`.
 
 ### project-pane
 

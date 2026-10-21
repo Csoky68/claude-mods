@@ -2,15 +2,27 @@ import { expect, mock, test } from 'claude-code/testing'
 import type { TestBody } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
+import { formatLocation, mergeLimits, parseMachines, shortenPath } from '../hooks/register'
+
 const LIMITS = [
-  { kind: 'five_hour', percentUsed: 34, resetsAt: '2026-10-05T14:20:00Z' },
-  { kind: 'seven_day', percentUsed: 92.5, resetsAt: '2026-10-09T08:00:00Z' },
+  { kind: 'five_hour', percentUsed: 34, resetsAt: '2099-10-05T14:20:00Z' },
+  { kind: 'seven_day', percentUsed: 92.5, resetsAt: '2099-10-09T08:00:00Z' },
 ]
 
 const HU = { options: { language: 'hu' } }
 
-function engine(on: On, withData = true) {
+const HOME = '/Users/csoky'
+const ROOT = '/Users/csoky/CLAUDE/Projects/claude-mods'
+
+function engine(on: On, withData = true, env: { ssh?: string; host?: string; rateLimits?: unknown[][] } = {}) {
   mock.store(on)
+  on('process.run', ($, e, next) =>
+    e.argv[0] === 'scutil' ? ({ value: { exitCode: 0, stdout: `${env.host ?? 'macmini-m4-hub'}\n`, stderr: '' } }) as never : next(e))
+  on('env.get', ($, e, next) =>
+    e.name === 'HOME' ? ({ value: HOME }) as never : e.name === 'SSH_CONNECTION' ? ({ value: env.ssh }) as never : next(e))
+  on('session.root', () => ({ value: ROOT }) as never)
+  const responses = env.rateLimits ?? [LIMITS]
+  let call = 0
   on('command.register', ($, e) => ({ value: { command: e.name } }) as never)
   on('session.start', ($, e) => e as never)
   on('session.measure', ($, e) => ({ changed: e.changed }))
@@ -19,7 +31,7 @@ function engine(on: On, withData = true) {
     value: {
       startedAt: 0,
       context: withData ? { window: 1_000_000, tokens: 591_000, percent: 59.1 } : { window: 1_000_000 },
-      rateLimits: LIMITS,
+      rateLimits: responses[Math.min(call++, responses.length - 1)],
     },
   }) as never)
 }
@@ -124,4 +136,69 @@ test('English too', { options: { language: 'en' } }, async ($, on) => {
   expect(await ui.find({ type: 'Text', text: /^Context/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: 'Week ' })).toBeDefined()
   await ui.unmount()
+})
+
+for (const surface of ['terminal', 'desktop'] as const) {
+  test(`location row is the last row, even without usage data (${surface})`, HU, async ($, on) => {
+    engine(on, false)
+    await $.session.start({ cwd: '/tmp', surface, isInteractive: true } as never)
+    const ui = await mount($, surface)
+    if (surface === 'terminal') {
+      expect(await ui.find({ type: 'Text', text: /^Hely/ })).toBeDefined()
+      expect(await ui.find({ type: 'Text', text: 'M4 · helyi · ~/CLAUDE/Projects/claude-mods' })).toBeDefined()
+    } else {
+      const svg = await ui.find({ type: 'Svg' })
+      const source = String(svg!.props.source)
+      expect(source).toMatch(/>Hely<.*>M4 · helyi · ~\/CLAUDE\/Projects\/claude-mods<\/text><\/svg>$/)
+      expect(source).toMatch(/még nincs adat/)
+      expect(String(svg!.props.alt)).toMatch(/Hely: M4 · helyi · ~\/CLAUDE\/Projects\/claude-mods$/)
+    }
+    await ui.unmount()
+  })
+}
+
+test('location over SSH with an unmapped host, in English', { options: { language: 'en' } }, async ($, on) => {
+  engine(on, true, { ssh: '100.64.0.1 50000 100.64.0.2 22', host: 'some-box' })
+  await $.session.start({ cwd: '/tmp', surface: 'terminal', isInteractive: true } as never)
+  const ui = await mount($, 'terminal')
+  expect(await ui.find({ type: 'Text', text: /^Where/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'some-box · SSH · ~/CLAUDE/Projects/claude-mods' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a response without five_hour keeps the previous five_hour', HU, async ($, on) => {
+  engine(on, true, { rateLimits: [LIMITS, [{ ...LIMITS[1]!, percentUsed: 50 }]] })
+  await $.session.start({ cwd: '/tmp', surface: 'terminal', isInteractive: true } as never)
+  await $.session.measure({ changed: ['rateLimits'] } as never)
+  const ui = await mount($, 'terminal')
+  expect(await ui.find({ type: 'Text', text: '5 óra ' })).toBeDefined()
+  // The second response arrived (the weekly value moved) and five_hour survived it.
+  expect(await ui.find({ type: 'Text', text: ' 50%' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: ' 34%' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('mergeLimits: keeps missing kinds, drops expired ones', HU, async () => {
+  const now = Date.parse('2026-10-21T12:00:00Z')
+  const prev = [
+    { kind: 'five_hour', percentUsed: 10, resetsAt: '2026-10-21T15:00:00Z' },
+    { kind: 'seven_day', percentUsed: 20, resetsAt: '2026-10-20T00:00:00Z' },
+  ]
+  const merged = mergeLimits(prev, [{ kind: 'seven_day', percentUsed: 5, resetsAt: '2026-10-27T00:00:00Z' }], now)
+  expect(merged).toEqual([
+    { kind: 'five_hour', percentUsed: 10, resetsAt: '2026-10-21T15:00:00Z' },
+    { kind: 'seven_day', percentUsed: 5, resetsAt: '2026-10-27T00:00:00Z' },
+  ])
+  expect(mergeLimits(prev, [], now)).toEqual([prev[0]])
+})
+
+test('formatLocation: machine map, home tilde and middle ellipsis', HU, async () => {
+  const map = parseMachines('macmini-m4-hub=M4,macmini-m1-hub=M1,Csakanyos-MacBook-Pro=MacBook')
+  expect(map['csakanyos-macbook-pro']).toBe('MacBook')
+  const loc = { machine: 'M1', ssh: true, path: '/Users/csoky/CLAUDE/Projects/Könyvelés asszisztens-dev' }
+  expect(formatLocation(loc, 'helyi', HOME, 80)).toBe('M1 · SSH · ~/CLAUDE/Projects/Könyvelés asszisztens-dev')
+  expect(formatLocation(loc, 'helyi', HOME, 50)).toBe('M1 · SSH · ~/…/Projects/Könyvelés asszisztens-dev')
+  expect(shortenPath('/Users/csoky/a/b/c/d/eeeeeeeeee/ffffffffff', HOME, 25)).toBe('~/…/eeeeeeeeee/ffffffffff')
+  expect(shortenPath('/Users/csoky/a/b/c/d/eeeeeeeeee/ffffffffff', HOME, 24)).toBe('…/eeeeeeeeee/ffffffffff')
+  expect(shortenPath('/opt/x', HOME, 3)).toBe('/opt/x')
 })

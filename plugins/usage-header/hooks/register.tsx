@@ -1,11 +1,12 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, SessionContextUsage } from 'claude-code'
 
-import type { Context } from '../types'
+import type { Context, Limit, Location } from '../types'
 
 const context = atom({ plugin: 'usage-header', key: 'context' } as const, null)
 const limits = atom({ plugin: 'usage-header', key: 'limits' } as const, [])
 // When off the band is empty; the tool-hub reads this too.
+const location = atom({ plugin: 'usage-header', key: 'location' } as const, null)
 const isOn = atom({ plugin: 'usage-header', key: 'isOn' } as const, true)
 
 const WARN_AT = 90
@@ -22,6 +23,8 @@ const STRINGS = {
     windows: { five_hour: '5 óra', seven_day: 'Hét' } as Record<string, string>,
     days: ['V', 'H', 'K', 'Sze', 'Cs', 'P', 'Szo'],
     noData: 'még nincs adat (az első válasz után jelenik meg)',
+    where: 'Hely',
+    local: 'helyi',
     command: 'Használati sáv a prompt fölött be/ki',
     on: 'Használati sáv bekapcsolva.',
     off: 'Használati sáv kikapcsolva.',
@@ -34,6 +37,8 @@ const STRINGS = {
     windows: { five_hour: '5h', seven_day: 'Week' } as Record<string, string>,
     days: ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'],
     noData: 'no data yet (shows after the first response)',
+    where: 'Where',
+    local: 'local',
     command: 'Usage band above the prompt on/off',
     on: 'Usage band on.',
     off: 'Usage band off.',
@@ -50,6 +55,48 @@ async function pickLanguage($: EngineInterface, setting: unknown): Promise<Lang>
   if (setting === 'hu' || setting === 'en') return setting
   const locale = (await $.env.get('LC_ALL')) || (await $.env.get('LANG')) || ''
   return locale.toLowerCase().startsWith('hu') ? 'hu' : 'en'
+}
+
+export const DEFAULT_MACHINES = 'macmini-m4-hub=M4,macmini-m1-hub=M1,Csakanyos-MacBook-Pro=MacBook'
+
+// "host=Name,host=Name" -> lower-cased host -> display name.
+export function parseMachines(spec: string): Record<string, string> {
+  const map: Record<string, string> = {}
+  for (const pair of spec.split(',')) {
+    const at = pair.indexOf('=')
+    if (at <= 0) continue
+    const host = pair.slice(0, at).trim().toLowerCase()
+    const name = pair.slice(at + 1).trim()
+    if (host && name) map[host] = name
+  }
+  return map
+}
+
+export const machineName = (host: string, map: Record<string, string>) => map[host.trim().toLowerCase()] ?? host.trim()
+
+// HOME prefix -> "~"; longer than `max`: middle ellipsis that keeps the last two segments.
+export function shortenPath(path: string, home: string, max: number): string {
+  let p = path
+  if (home && (p === home || p.startsWith(home.endsWith('/') ? home : `${home}/`))) p = `~${p.slice(home.replace(/\/$/, '').length)}`
+  if (p.length <= max) return p
+  const segs = p.split('/')
+  if (segs.length <= 3) return p
+  const tail = segs.slice(-2).join('/')
+  const head = `${segs[0]}/…/${tail}`
+  return head.length <= max ? head : `…/${tail}`
+}
+
+// "M4 · helyi · ~/CLAUDE/Projects/claude-mods", the path shortened to fit `width` characters.
+export function formatLocation(loc: Location, localWord: string, home: string, width: number): string {
+  const prefix = [loc.machine, loc.ssh ? 'SSH' : localWord].filter(Boolean).join(' · ')
+  return `${prefix} · ${shortenPath(loc.path, home, Math.max(8, width - prefix.length - 3))}`
+}
+
+// Keep the last known value per kind (a response may omit a window); drop only what has reset.
+export function mergeLimits(prev: readonly Limit[], incoming: readonly Limit[], now: number): Limit[] {
+  const byKind = new Map<string, Limit>()
+  for (const l of [...prev, ...incoming]) byKind.set(l.kind, l)
+  return [...byKind.values()].filter(l => l.resetsAt === undefined || !(Date.parse(l.resetsAt) < now))
 }
 
 export function tokens(n: number): string {
@@ -95,8 +142,10 @@ const PAD = 4
 const BAR_X = 76
 const BAR_W = 300
 const BAR_H = 8
-export function bandSvg(rows: SvgRow[], noData?: { label: string; text: string }): string {
-  const height = Math.max(1, rows.length + (noData ? 1 : 0)) * ROW_H + PAD * 2
+type TextRow = { label: string; text: string }
+export function bandSvg(rows: SvgRow[], noData?: TextRow, info?: TextRow): string {
+  const count = rows.length + (noData ? 1 : 0) + (info ? 1 : 0)
+  const height = Math.max(1, count) * ROW_H + PAD * 2
   const style =
     '<style>' +
     'text{font-family:system-ui,-apple-system,"Segoe UI",sans-serif;font-size:12.5px}' +
@@ -123,14 +172,60 @@ export function bandSvg(rows: SvgRow[], noData?: { label: string; text: string }
     parts.push(`<text class="${level}" x="${BAR_X + BAR_W + 12}" y="${y}" dominant-baseline="central" font-weight="700">${esc(pctLabel(row.percent))}</text>`)
     parts.push(`<text class="m" x="${BAR_X + BAR_W + 66}" y="${y}" dominant-baseline="central">${esc(row.detail)}</text>`)
   })
+  if (info) {
+    const y = PAD + (count - 1) * ROW_H + ROW_H / 2
+    parts.push(`<text class="t" x="0" y="${y}" dominant-baseline="central" font-weight="600">${esc(info.label)}</text>`)
+    parts.push(`<text class="m" x="${BAR_X}" y="${y}" dominant-baseline="central">${esc(info.text)}</text>`)
+  }
   return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${SVG_W} ${height}" width="${SVG_W}" height="${height}">${style}${parts.join('')}</svg>`
 }
+
+let lastRaw = ''
+let home = ''
 
 async function refresh($: EngineInterface): Promise<void> {
   // Local estimate without the per-category breakdown: no model call.
   const usage = await $.session.usage()
   await update($, context, prev => toContext(usage.context) ?? prev)
-  await update($, limits, () => usage.rateLimits)
+  const raw = JSON.stringify(usage.rateLimits)
+  if (raw !== lastRaw) {
+    lastRaw = raw
+    $.ui.log(raw, { to: 'debug' })
+  }
+  await update($, limits, prev => mergeLimits(prev, usage.rateLimits, Date.now()))
+}
+
+async function hostName($: EngineInterface): Promise<string> {
+  for (const argv of [['scutil', '--get', 'LocalHostName'], ['hostname', '-s']]) {
+    try {
+      const r = await $.process.run(argv, { timeoutMs: 5000 })
+      if (r.exitCode === 0 && r.stdout.trim()) return r.stdout.trim()
+    } catch {
+      // Try the next command.
+    }
+  }
+  return ''
+}
+
+async function currentPath($: EngineInterface): Promise<string> {
+  try {
+    return await $.session.root()
+  } catch {
+    return await $.session.cwd()
+  }
+}
+
+// Machine and mode once per session; the path again at every turn end (no model call).
+async function refreshLocation($: EngineInterface, machines: Record<string, string> | null): Promise<void> {
+  const path = await currentPath($).catch(() => '')
+  if (machines === null) {
+    await update($, location, prev => (prev === null ? null : { ...prev, path }))
+    return
+  }
+  home = (await $.env.get('HOME')) ?? ''
+  const ssh = Boolean((await $.env.get('SSH_CONNECTION'))?.trim())
+  const machine = machineName(await hostName($), machines)
+  await update($, location, () => ({ machine, ssh, path }))
 }
 
 async function setOn($: EngineInterface, wanted: boolean): Promise<void> {
@@ -140,6 +235,7 @@ async function setOn($: EngineInterface, wanted: boolean): Promise<void> {
 
 export const register: Register = (on, options) => {
   if (options.language === 'hu' || options.language === 'en') lang = options.language
+  const machines = parseMachines(typeof options.machineNames === 'string' ? options.machineNames : DEFAULT_MACHINES)
 
   on('session.start', async ($, e, next) => {
     const result = await next(e)
@@ -147,6 +243,7 @@ export const register: Register = (on, options) => {
     const saved = (await $.store.get('isOn')) !== false
     await update($, isOn, () => saved)
     await $.command.register({ name: 'hasznalat', description: t().command, argumentHint: t().hint, immediate: true })
+    await refreshLocation($, machines).catch(() => undefined)
     await refresh($)
     return result
   })
@@ -171,7 +268,10 @@ export const register: Register = (on, options) => {
   on('session.measure', async ($, e, next) => {
     const result = await next(e)
     const moved = e.changed.includes('context') || e.changed.includes('rateLimits')
-    if (moved && (await read($, isOn))) await refresh($)
+    if (await read($, isOn)) {
+      await refreshLocation($, null).catch(() => undefined)
+      if (moved) await refresh($)
+    }
     return result
   })
 
@@ -181,7 +281,9 @@ export const register: Register = (on, options) => {
     const ui = $.ui.resolve(e)
     const { Box, Text } = ui
     const c = await read($, context)
-    const shown = (await read($, limits)).filter(l => l.kind in t().windows)
+    const now = Date.now()
+    const shown = mergeLimits([], await read($, limits), now).filter(l => l.kind in t().windows)
+    const loc = await read($, location)
     const columns = e.props.bodyColumns || e.viewport?.columns || 0
 
     // Every remote surface table carries Svg; the terminal's does not (its resolve may still list the key).
@@ -191,16 +293,19 @@ export const register: Register = (on, options) => {
       if (c !== null) rows.push({ label: t().context, percent: c.percent, detail: `${tokens(c.total)} / ${tokens(c.max)}` })
       for (const l of shown) rows.push({ label: t().windows[l.kind]!, percent: l.percentUsed, detail: resetText(l.kind, l.resetsAt).trim() })
       const noData = c === null ? { label: t().context, text: t().noData } : undefined
+      // ~6.5 px per character of the 12.5 px font in the space right of the label column.
+      const info = loc === null ? undefined : { label: t().where, text: formatLocation(loc, t().local, home, Math.floor((SVG_W - BAR_X) / 6.5)) }
       const alt = [
         ...(noData ? [`${noData.label}: ${noData.text}`] : []),
         ...rows.map(r => `${r.label} ${pctLabel(r.percent)} ${r.detail.replace(' / ', '/')}`.trim()),
+        ...(info ? [`${info.label}: ${info.text}`] : []),
       ].join(' · ')
       // Columns are character cells; at ~7 px each this keeps the drawing inside the slot.
       const width = columns > 0 ? Math.min(SVG_W, Math.floor(columns * 7)) : undefined
       return (
         <Box flexDirection="column">
           {below}
-          <Svg key="usage-band" source={bandSvg(rows, noData)} alt={alt} width={width} />
+          <Svg key="usage-band" source={bandSvg(rows, noData, info)} alt={alt} width={width} />
         </Box>
       )
     }
@@ -255,11 +360,20 @@ export const register: Register = (on, options) => {
         </Box>
       )
 
+    const whereRow =
+      loc === null ? null : (
+        <Box flexDirection="row">
+          {label(t().where)}
+          <Text dimColor>{formatLocation(loc, t().local, home, cols - LABEL - 1)}</Text>
+        </Box>
+      )
+
     return (
       <Box flexDirection="column">
         {below}
         {contextRow}
         {limitRow}
+        {whereRow}
       </Box>
     )
   })
