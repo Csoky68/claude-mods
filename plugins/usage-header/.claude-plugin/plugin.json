@@ -1,6 +1,6 @@
 {
   "name": "usage-header",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Compact band above the prompt: context window usage bar plus the 5-hour and weekly limits. Hungarian (default) or English.",
   "types": "./types/index.d.ts",
   "author": {

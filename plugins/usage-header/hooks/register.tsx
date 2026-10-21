@@ -11,8 +11,7 @@ const isOn = atom({ plugin: 'usage-header', key: 'isOn' } as const, true)
 const WARN_AT = 90
 const CAUTION_AT = 70
 const LABEL = 11
-const MAX_BAR = 40
-const MAX_LIMIT_BAR = 16
+const MAX_BAR = 60
 
 type Lang = 'hu' | 'en'
 
@@ -65,30 +64,66 @@ export function toContext(u: SessionContextUsage): Context | null {
   return { total: u.tokens ?? Math.round((u.percent / 100) * u.window), max: u.window, percent: u.percent }
 }
 
-// Thin bar split into filled cells, an optional half-cell end and the remaining track.
-export function bar(percent: number, width: number): { filled: string; track: string } {
-  const exact = (Math.min(100, Math.max(0, percent)) / 100) * width
-  let full = Math.floor(exact)
-  let half = exact - full >= 0.5
-  if (full >= width) {
-    full = width
-    half = false
-  }
-  const filled = '━'.repeat(full) + (half ? '╸' : '')
-  return { filled, track: '━'.repeat(width - full - (half ? 1 : 0)) }
-}
-
 const clamp = (n: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, n))
 
 const levelColor = (percent: number) => (percent >= WARN_AT ? 'red' : percent >= CAUTION_AT ? 'yellow' : 'green')
 
-const pctText = (percent: number) => `  ${Math.round(percent)}%${percent >= WARN_AT ? ' ⚠' : ''}`
+const pctLabel = (percent: number) => `${Math.round(percent)}%${percent >= WARN_AT ? ' ⚠' : ''}`
+
+// Terminal block bar: filled cells in the level colour, the rest as a dim track.
+export function blocks(percent: number, width: number): { filled: string; track: string } {
+  const full = Math.min(width, Math.max(0, Math.round((percent / 100) * width)))
+  return { filled: '█'.repeat(full), track: '░'.repeat(width - full) }
+}
 
 function resetText(kind: string, resetsAt?: string): string {
   if (resetsAt === undefined) return ''
   const at = new Date(resetsAt)
   const hhmm = `${String(at.getHours()).padStart(2, '0')}:${String(at.getMinutes()).padStart(2, '0')}`
   return kind === 'five_hour' ? ` → ${hhmm}` : ` → ${t().days[at.getDay()]} ${hhmm}`
+}
+
+export type SvgRow = { label: string; percent: number; detail: string }
+
+const esc = (text: string) => text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+
+// Remote surfaces (desktop, mobile, vscode): the whole band as one SVG, so a proportional font
+// cannot misalign the bars. Dark theme by default, light overrides via prefers-color-scheme.
+export const SVG_W = 560
+const ROW_H = 22
+const PAD = 4
+const BAR_X = 76
+const BAR_W = 300
+const BAR_H = 8
+export function bandSvg(rows: SvgRow[], noData?: { label: string; text: string }): string {
+  const height = Math.max(1, rows.length + (noData ? 1 : 0)) * ROW_H + PAD * 2
+  const style =
+    '<style>' +
+    'text{font-family:system-ui,-apple-system,"Segoe UI",sans-serif;font-size:12.5px}' +
+    '.t{fill:#e6e6e6}.m{fill:#9a9a9a}.tr{fill:rgba(255,255,255,0.12)}' +
+    '.green{fill:#3fb950}.yellow{fill:#d29922}.red{fill:#f85149}' +
+    '@media (prefers-color-scheme: light){.t{fill:#1f2328}.m{fill:#656d76}.tr{fill:rgba(0,0,0,0.10)}' +
+    '.green{fill:#1a7f37}.yellow{fill:#9a6700}.red{fill:#cf222e}}' +
+    '</style>'
+  const parts: string[] = []
+  if (noData) {
+    const y = PAD + ROW_H / 2
+    parts.push(`<text class="t" x="0" y="${y}" dominant-baseline="central" font-weight="600">${esc(noData.label)}</text>`)
+    parts.push(`<text class="m" x="${BAR_X}" y="${y}" dominant-baseline="central">${esc(noData.text)}</text>`)
+  }
+  rows.forEach((row, i) => {
+    const y = PAD + (i + (noData ? 1 : 0)) * ROW_H + ROW_H / 2
+    const level = levelColor(row.percent)
+    const p = Math.min(100, Math.max(0, row.percent))
+    const fill = p <= 0 ? 0 : Math.max(BAR_H, (p / 100) * BAR_W)
+    parts.push(`<text class="t" x="0" y="${y}" dominant-baseline="central" font-weight="600">${esc(row.label)}</text>`)
+    parts.push(`<rect class="tr" x="${BAR_X}" y="${y - BAR_H / 2}" width="${BAR_W}" height="${BAR_H}" rx="${BAR_H / 2}"/>`)
+    if (fill > 0)
+      parts.push(`<rect class="${level}" x="${BAR_X}" y="${y - BAR_H / 2}" width="${fill.toFixed(1)}" height="${BAR_H}" rx="${BAR_H / 2}"/>`)
+    parts.push(`<text class="${level}" x="${BAR_X + BAR_W + 12}" y="${y}" dominant-baseline="central" font-weight="700">${esc(pctLabel(row.percent))}</text>`)
+    parts.push(`<text class="m" x="${BAR_X + BAR_W + 66}" y="${y}" dominant-baseline="central">${esc(row.detail)}</text>`)
+  })
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${SVG_W} ${height}" width="${SVG_W}" height="${height}">${style}${parts.join('')}</svg>`
 }
 
 async function refresh($: EngineInterface): Promise<void> {
@@ -143,13 +178,34 @@ export const register: Register = (on, options) => {
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     if (e.props.hasSurvey || !(await read($, isOn))) return next(e)
     const below = await next(e)
-    const { Box, Text } = $.ui.resolve(e)
+    const ui = $.ui.resolve(e)
+    const { Box, Text } = ui
     const c = await read($, context)
     const shown = (await read($, limits)).filter(l => l.kind in t().windows)
-    const columns = e.props.bodyColumns || e.viewport?.columns || 80
-    // One spare column so the row never touches the edge and wraps.
-    const room = columns - LABEL - 1
+    const columns = e.props.bodyColumns || e.viewport?.columns || 0
 
+    // Every remote surface table carries Svg; the terminal's does not (its resolve may still list the key).
+    if (e.surface !== 'terminal' && 'Svg' in ui && ui.Svg) {
+      const { Svg } = ui
+      const rows: SvgRow[] = []
+      if (c !== null) rows.push({ label: t().context, percent: c.percent, detail: `${tokens(c.total)} / ${tokens(c.max)}` })
+      for (const l of shown) rows.push({ label: t().windows[l.kind]!, percent: l.percentUsed, detail: resetText(l.kind, l.resetsAt).trim() })
+      const noData = c === null ? { label: t().context, text: t().noData } : undefined
+      const alt = [
+        ...(noData ? [`${noData.label}: ${noData.text}`] : []),
+        ...rows.map(r => `${r.label} ${pctLabel(r.percent)} ${r.detail.replace(' / ', '/')}`.trim()),
+      ].join(' · ')
+      // Columns are character cells; at ~7 px each this keeps the drawing inside the slot.
+      const width = columns > 0 ? Math.min(SVG_W, Math.floor(columns * 7)) : undefined
+      return (
+        <Box flexDirection="column">
+          {below}
+          <Svg key="usage-band" source={bandSvg(rows, noData)} alt={alt} width={width} />
+        </Box>
+      )
+    }
+
+    const cols = columns || 80
     const label = (text: string) => <Text bold>{text.padEnd(LABEL)}</Text>
 
     let contextRow
@@ -161,9 +217,11 @@ export const register: Register = (on, options) => {
         </Box>
       )
     } else {
-      const pct = pctText(c.percent)
-      const amount = `  ${tokens(c.total)} / ${tokens(c.max)}`
-      const { filled, track } = bar(c.percent, clamp(room - pct.length - amount.length, 4, MAX_BAR))
+      const pct = ` ${pctLabel(c.percent)}`
+      const amount = ` ${tokens(c.total)}/${tokens(c.max)}`
+      // One spare column so the row never reaches the edge and wraps.
+      const width = clamp(cols - LABEL - 1 - pct.length - amount.length, 4, MAX_BAR)
+      const { filled, track } = blocks(c.percent, width)
       const color = levelColor(c.percent)
       contextRow = (
         <Box flexDirection="row">
@@ -176,30 +234,21 @@ export const register: Register = (on, options) => {
       )
     }
 
-    // Limit bars share the row: subtract each item's name, percent and reset text plus the gaps.
-    const GAP = 4
-    const items = shown.map(l => ({
-      l,
-      name: `${t().windows[l.kind]} `,
-      pct: pctText(l.percentUsed),
-      reset: resetText(l.kind, l.resetsAt),
-    }))
-    const fixed = items.reduce((a, i) => a + i.name.length + i.pct.length + i.reset.length, 0) + GAP * Math.max(0, items.length - 1)
-    const limitWidth = items.length === 0 ? 0 : clamp(Math.floor((room - fixed) / items.length), 4, MAX_LIMIT_BAR)
+    const limitWidth = Math.max(6, Math.min(20, Math.floor((cols - LABEL) / 2) - 26))
     const limitRow =
-      items.length === 0 ? null : (
-        <Box flexDirection="row" flexWrap="wrap" columnGap={GAP}>
+      shown.length === 0 ? null : (
+        <Box flexDirection="row" flexWrap="wrap" columnGap={3}>
           {label(t().limits)}
-          {items.map(({ l, name, pct, reset }) => {
-            const { filled, track } = bar(l.percentUsed, limitWidth)
+          {shown.map(l => {
+            const { filled, track } = blocks(l.percentUsed, limitWidth)
             const color = levelColor(l.percentUsed)
             return (
               <Box key={`limit-${l.kind}`} flexDirection="row">
-                <Text>{name}</Text>
+                <Text>{`${t().windows[l.kind]} `}</Text>
                 <Text color={color}>{filled}</Text>
                 <Text dimColor>{track}</Text>
-                <Text color={color} bold>{pct}</Text>
-                <Text dimColor>{reset}</Text>
+                <Text color={color} bold>{` ${pctLabel(l.percentUsed)}`}</Text>
+                <Text dimColor>{resetText(l.kind, l.resetsAt)}</Text>
               </Box>
             )
           })}

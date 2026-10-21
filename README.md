@@ -48,14 +48,15 @@ A státuszsorba (a prompt alá) írja:
 
 ### usage-header
 
-Kompakt sáv a prompt fölött: a kontextusablak telítettsége egy vékony sávval, alatta az 5 órás és a heti limit.
+Kompakt sáv a prompt fölött: a kontextusablak telítettsége, alatta az 5 órás és a heti limit.
 
 ```
-Kontextus  ━━━━━━━━━━━━━━━━━━━━━━━━╸━━━━━━━━━━━━━━━  59%  591k / 1M
-Limitek    5 óra ━━╸━━━━━━━━━━━━━  15% → 20:40   Hét ━━━╸━━━━━━━━━━━━  18% → K 03:00
+Kontextus  ███████████████████████████████████░░░░░░░░░░░░░░░░░░░░░░░░░ 59% 591k/1M
+Limitek    5 óra ███████░░░░░░░░░░░░░ 34% → 20:40   Hét ███████████████████░ 93% ⚠ → K 03:00
 ```
 
-- Színek: zöld 70% alatt, sárga 70–90%, piros 90% fölött (⚠); a sáv vége félcellás pontosságú. A sávok szélessége a terminálhoz igazodik, nem törnek új sorba.
+- Terminálban blokksáv (fent); az asztali appban (és mobilon) egyetlen SVG: három sor (Kontextus / 5 óra / Hét) igazított, lekerekített sávokkal, sötét és világos témához.
+- Színek: zöld 70% alatt, sárga 70–90%, piros 90% fölött (⚠). A terminálos kontextussor nem törik új sorba.
 - Az adat helyi becslés (`$.session.usage()`), modellhívás nélkül; minden turn végén és limitmozduláskor frissül. Limitadat csak Pro/Max előfizetéssel van.
 - Nincs kategóriabontás és elválasztó vonal; a sáv a fókusz mód listája és az eszköztár alatt jelenik meg.
 - `/hasznalat` kapcsolja, `/hasznalat be|ki` beállítja; az állapotot sessionök között megőrzi. Az eszköztárban (`/eszkozok`) is kapcsolható.
