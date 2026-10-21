@@ -8,19 +8,30 @@ function words(segment: string): string[] {
   return [...segment.matchAll(/"([^"]*)"|'([^']*)'|(\S+)/g)].map(m => m[1] ?? m[2] ?? m[3] ?? '')
 }
 
+// Resolve a `cd`/`git -C` target against the previous dir: relative paths compose, absolute and `~` replace.
+function joinDir(prev: string | null, next: string): string {
+  if (next.startsWith('/') || next.startsWith('~') || prev === null) return next
+  return `${prev.replace(/\/+$/, '')}/${next}`
+}
+
 // `cd x && git push origin a:b`, `git -C x push -u origin main` → mit pusholunk, hova.
 export function parsePush(command: string): Push | null {
   let dir: string | null = null
   for (const segment of command.split(/&&|\|\||;|\n/)) {
     const w = words(segment.trim())
-    if (w[0] === 'cd' && w[1] !== undefined) dir = w[1]
+    if (w[0] === 'cd') {
+      // Plain `cd` goes home; `cd -` is ignored (previous dir is unknown to a pure parser).
+      if (w[1] === undefined) dir = '~'
+      else if (w[1] !== '-') dir = joinDir(dir, w[1])
+    }
     const g = w.indexOf('git')
     if (g === -1) continue
     let i = g + 1
     let gitDir = dir
     while (i < w.length && (w[i] ?? '').startsWith('-')) {
       if (w[i] === '-C') {
-        gitDir = w[i + 1] ?? null
+        const target = w[i + 1]
+        if (target !== undefined) gitDir = joinDir(gitDir, target)
         i += 2
       } else if (w[i] === '-c') i += 2
       else i += 1

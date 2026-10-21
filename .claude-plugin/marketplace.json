@@ -86,7 +86,7 @@
     },
     {
       "name": "public-repo-guard",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "description": "Push-őr: nyilvános GitHub-repóba push (vagy nyilvánossá tétel) előtt átnézi, mi menne ki: Supabase projekt-ID, kulcsok, tokenek, e-mailek, helyi útvonalak, privát repónevek, .env fájlok; találat esetén egygombos felugróban kérdez. /pushor be|ki|figyel <szöveg>. Magyar/angol.",
       "author": {
         "name": "Szota Szabolcs",

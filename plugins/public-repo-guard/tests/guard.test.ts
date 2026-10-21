@@ -43,6 +43,11 @@ test('a push parancs értelmezése', {}, async () => {
   expect(parsePush('git push --dry-run')).toBe(null)
   expect(parsePush('git push origin :old')).toBe(null)
   expect(parsePush('git status')).toBe(null)
+  // Regression: chained `cd`s compose instead of keeping only the last relative target.
+  expect(parsePush('cd /a/b && cd fork && git push origin main')?.dir).toBe('/a/b/fork')
+  expect(parsePush('cd ~/x && cd y && git push')?.dir).toBe('~/x/y')
+  expect(parsePush('cd /a && cd /c && git push')?.dir).toBe('/c')
+  expect(parsePush('cd /a && git -C sub push origin main')?.dir).toBe('/a/sub')
   expect(goesPublic('gh repo edit me/x --visibility public --accept-visibility-change-consequences')).toBe(true)
   expect(goesPublic('gh repo create me/x --public --source . --push')).toBe(true)
   expect(githubRepo('git@github.com:me/x.git')).toBe('me/x')

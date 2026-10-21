@@ -1,6 +1,6 @@
 {
   "name": "public-repo-guard",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Push guard: before a git push to a public GitHub repo (or making one public) it scans what would go out for Supabase project IDs, keys, tokens, emails, local paths, private repo names and .env files, and asks in a one-key popup. /pushor toggles. Hungarian or English.",
   "types": "./types/index.d.ts",
   "author": {
