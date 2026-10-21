@@ -27,6 +27,8 @@ declare module 'claude-code' {
       turns: number[]
       compactAt: number | null
       session: SessionInfo | null
+      /** True while the /mods switchboard turns the band off or hides it. */
+      muted: boolean
     }
   }
 }

@@ -12,6 +12,10 @@ const burn = atom({ plugin: 'usage-header', key: 'burn' } as const, {})
 const turns = atom({ plugin: 'usage-header', key: 'turns' } as const, [])
 const compactAt = atom({ plugin: 'usage-header', key: 'compactAt' } as const, null)
 const sessionInfo = atom({ plugin: 'usage-header', key: 'session' } as const, null)
+// The /mods switchboard: true while ~/.claude/mods/switches.json has "usage-header": false
+// or "usage-header:hidden": true. Then the band draws nothing.
+const muted = atom({ plugin: 'usage-header', key: 'muted' } as const, false)
+const SWITCH_POLL_MS = 5000
 
 const WARN_AT = 90
 const CAUTION_AT = 70
@@ -418,6 +422,30 @@ async function refreshLocation($: EngineInterface, machines: Record<string, stri
   await update($, location, () => ({ machine, ssh, path, git }))
 }
 
+let switchesRaw: string | null = null
+let switchTimer = false
+
+// One small file read per poll; the band is only redrawn when the file's text changed.
+// An unreadable or half-written file keeps the last decision.
+export async function readSwitchboard($: EngineInterface): Promise<void> {
+  try {
+    const path = `${(await $.env.get('HOME')) ?? ''}/.claude/mods/switches.json`
+    const raw = (await $.fs.exists(path)) ? String(await $.fs.read(path)) : ''
+    if (raw === switchesRaw) return
+    let json: Record<string, unknown> = {}
+    if (raw.trim()) {
+      const parsed = JSON.parse(raw) as unknown
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return
+      json = parsed as Record<string, unknown>
+    }
+    switchesRaw = raw
+    const off = json['usage-header'] === false || json['usage-header:hidden'] === true
+    await update($, muted, () => off)
+  } catch {
+    // Keep the last decision.
+  }
+}
+
 async function setOn($: EngineInterface, wanted: boolean): Promise<void> {
   await update($, isOn, () => wanted)
   await $.store.set('isOn', wanted)
@@ -478,6 +506,13 @@ export const register: Register = (on, options) => {
     await $.command.register({ name: 'hasznalat', description: t().command, argumentHint: t().hint, immediate: true })
     await refreshLocation($, machines).catch(() => undefined)
     await refresh($)
+    await readSwitchboard($)
+    if (!switchTimer) {
+      switchTimer = true
+      $.clock.every(SWITCH_POLL_MS, () => {
+        void readSwitchboard($)
+      })
+    }
     return result
   })
 
@@ -513,7 +548,7 @@ export const register: Register = (on, options) => {
   })
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
-    if (e.props.hasSurvey || !(await read($, isOn))) return next(e)
+    if (e.props.hasSurvey || !(await read($, isOn)) || (await read($, muted))) return next(e)
     const below = await next(e)
     const ui = $.ui.resolve(e)
     const { Box, Text } = ui

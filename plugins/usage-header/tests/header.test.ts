@@ -21,7 +21,11 @@ const ROOT = '/Users/csoky/CLAUDE/Projects/claude-mods'
 type Env = {
   ssh?: string; host?: string; rateLimits?: unknown[][]
   git?: { branch: string; porcelain: string }; contexts?: number[]; startedAt?: number; usd?: number; threshold?: number
+  /** The /mods switchboard file's text; absent: no file. Read through `.text` so a test can change it. */
+  switches?: { text?: string }
 }
+
+const SWITCHES = `${'/Users/csoky'}/.claude/mods/switches.json`
 
 const run = (stdout: string, exitCode = 0) => ({ value: { exitCode, stdout, stderr: '' } }) as never
 
@@ -36,6 +40,13 @@ function engine(on: On, withData = true, env: Env = {}) {
   on('env.get', ($, e, next) =>
     e.name === 'HOME' ? ({ value: HOME }) as never : e.name === 'SSH_CONNECTION' ? ({ value: env.ssh }) as never : next(e))
   on('session.root', () => ({ value: ROOT }) as never)
+  // The switchboard file is always faked: the real one on this machine never leaks into a test.
+  on('fs.exists', ($, e, next) => (e.path === SWITCHES ? ({ value: env.switches?.text !== undefined }) as never : next(e)))
+  on('fs.read', ($, e, next) => {
+    if (e.path !== SWITCHES) return next(e)
+    if (env.switches?.text === undefined) throw new Error('ENOENT')
+    return { value: env.switches.text } as never
+  })
   const responses = env.rateLimits ?? [LIMITS]
   let call = 0
   on('command.register', ($, e) => ({ value: { command: e.name } }) as never)
@@ -339,3 +350,46 @@ for (const surface of ['terminal', 'desktop'] as const) {
     await ui.unmount()
   })
 }
+
+for (const [label, text] of [
+  ['off', '{ "usage-header": false }'],
+  ['hidden', '{ "usage-header:hidden": true }'],
+] as const) {
+  test(`the /mods switchboard: ${label} in switches.json draws nothing`, HU, async ($, on) => {
+    engine(on, true, { switches: { text } })
+    await $.session.start({ cwd: '/tmp', surface: 'terminal', isInteractive: true } as never)
+    const ui = await mount($, 'terminal')
+    expect(await ui.find({ type: 'Text', text: /%/ }), 'no band').toBeUndefined()
+    expect(await ui.find({ key: 'engine' }), 'the rest still draws').toBeDefined()
+    await ui.unmount()
+  })
+}
+
+test('the switchboard is polled: turned off, then on again, within 5 seconds', HU, async ($, on) => {
+  const clock = mock.clock(on, { now: Date.now() })
+  const switches: { text?: string } = { text: '{"cache-clock": false}' }
+  engine(on, true, { switches })
+  await $.session.start({ cwd: '/tmp', surface: 'terminal', isInteractive: true } as never)
+  let ui = await mount($, 'terminal')
+  expect(await ui.find({ type: 'Text', text: ' 59%' }), 'on: another key does not matter').toBeDefined()
+  await ui.unmount()
+
+  switches.text = '{"cache-clock": false, "usage-header": false}'
+  await clock.advance(5000)
+  ui = await mount($, 'terminal')
+  expect(await ui.find({ type: 'Text', text: /%/ }), 'off after one poll').toBeUndefined()
+  await ui.unmount()
+
+  // A half-written file keeps the last decision.
+  switches.text = '{"usage-header'
+  await clock.advance(5000)
+  ui = await mount($, 'terminal')
+  expect(await ui.find({ type: 'Text', text: /%/ }), 'still off').toBeUndefined()
+  await ui.unmount()
+
+  delete switches.text
+  await clock.advance(5000)
+  ui = await mount($, 'terminal')
+  expect(await ui.find({ type: 'Text', text: ' 59%' }), 'no file: on again').toBeDefined()
+  await ui.unmount()
+})
